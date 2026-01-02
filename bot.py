@@ -6,6 +6,9 @@ from keep_alive import keep_alive
 
 # ================= BASIC =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN missing")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 keep_alive()
 
@@ -13,6 +16,10 @@ ADMIN_SECRET = "imdhaval"
 
 KEYS_FILE = "keys.json"
 USERS_FILE = "users.json"
+SALES_FILE = "sales.json"
+
+admin_sessions = set()
+admin_waiting = set()
 
 # ================= HELPERS =================
 def load(file, default):
@@ -26,16 +33,24 @@ def save(file, data):
 def gen_key():
     return "imdhaval-" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
-def is_active(uid):
-    users = load(USERS_FILE, {})
-    return str(uid) in users and time.time() < users[str(uid)]["expire"]
-
 def duration_text(sec):
     if sec < 3600:
         return f"{sec//60} Minutes"
     if sec < 86400:
         return "1 Day"
     return "30 Days"
+
+def user_active(uid):
+    users = load(USERS_FILE, {})
+    return str(uid) in users and time.time() < users[str(uid)]["expire"]
+
+def ensure_sales():
+    if not os.path.exists(SALES_FILE):
+        save(SALES_FILE, {
+            "total_generated": 0,
+            "total_sold": 0,
+            "total_downloads": 0
+        })
 
 # ================= INSTAGRAM =================
 L = instaloader.Instaloader(download_videos=True, save_metadata=False)
@@ -45,119 +60,182 @@ L.context._session.cookies = cj
 DOWNLOAD_DIR = "downloads"
 
 # ================= START =================
-@bot.message_handler(commands=["start"])
-def start(m):
+def send_welcome(cid):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("👑 Owner Login")
     bot.send_message(
-        m.chat.id,
-        "🔥 Instagram Reel Downloader – *Private Bot*\n\n"
-        "🔐 Enter your key to start service\n\n"
+        cid,
+        "🔥 *Instagram Reel Downloader – Private Bot*\n\n"
+        "🔐 Enter your key to start service\n"
         "💬 Buy key 👉 @imvrct",
         reply_markup=kb,
         parse_mode="Markdown"
     )
 
+@bot.message_handler(commands=["start"])
+def start(m):
+    admin_sessions.discard(m.chat.id)
+    admin_waiting.discard(m.chat.id)
+    send_welcome(m.chat.id)
+
 # ================= OWNER LOGIN =================
 @bot.message_handler(func=lambda m: m.text == "👑 Owner Login")
 def owner_login(m):
-    msg = bot.send_message(m.chat.id, "👋 Welcome Owner\nEnter secret key 🔐")
-    bot.register_next_step_handler(msg, verify_owner)
+    admin_waiting.add(m.chat.id)
+    bot.send_message(m.chat.id, "👋 Welcome Owner\n🔐 Enter admin key")
 
-def verify_owner(m):
+@bot.message_handler(func=lambda m: m.chat.id in admin_waiting)
+def admin_key_loop(m):
     if m.text.strip() != ADMIN_SECRET:
-        bot.send_message(m.chat.id, "❌ Chal nikal 😄\nTu owner nahi hai")
+        bot.send_message(m.chat.id, "❌ Key not found\n🔁 Try again")
         return
+    admin_waiting.discard(m.chat.id)
+    admin_sessions.add(m.chat.id)
     show_admin_panel(m.chat.id)
 
 # ================= ADMIN PANEL =================
+def admin_only(m):
+    if m.chat.id not in admin_sessions:
+        bot.send_message(m.chat.id, "🔐 Please login as admin")
+        return False
+    return True
+
 def show_admin_panel(cid):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("➕ Generate Key", "📋 All Keys")
+    kb.add("➕ Generate Key", "🔁 Renew User")
+    kb.add("📋 All Keys", "📊 Sales & Usage")
     kb.add("❌ Delete Key", "🚪 Logout")
     bot.send_message(cid, "👑 *Admin Panel*", reply_markup=kb, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "➕ Generate Key")
 def gen_key_menu(m):
+    if not admin_only(m): return
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("5 Minutes", "1 Day", "30 Days")
     bot.send_message(m.chat.id, "⏳ Select duration", reply_markup=kb)
-    bot.register_next_step_handler(m, do_gen_key)
 
+@bot.message_handler(func=lambda m: m.chat.id in admin_sessions and m.text in ["5 Minutes","1 Day","30 Days"])
 def do_gen_key(m):
+    ensure_sales()
     duration = {"5 Minutes":300,"1 Day":86400,"30 Days":2592000}
-    if m.text not in duration:
-        return
     key = gen_key()
     keys = load(KEYS_FILE, {})
     keys[key] = duration[m.text]
     save(KEYS_FILE, keys)
-    bot.send_message(m.chat.id, f"✅ Key Generated\n🔑 {key}\n⏳ {m.text}")
+
+    sales = load(SALES_FILE, {})
+    sales["total_generated"] += 1
+    save(SALES_FILE, sales)
+
+    bot.send_message(
+        m.chat.id,
+        f"✅ *Key Generated*\n\n🔑 `{key}`\n⏳ {m.text}",
+        parse_mode="Markdown"
+    )
     show_admin_panel(m.chat.id)
 
-@bot.message_handler(func=lambda m: m.text == "📋 All Keys")
-def all_keys(m):
-    keys = load(KEYS_FILE, {})
-    if not keys:
-        bot.send_message(m.chat.id, "No active keys")
+@bot.message_handler(func=lambda m: m.text == "🔁 Renew User")
+def renew_prompt(m):
+    if not admin_only(m): return
+    bot.send_message(m.chat.id, "Send Telegram User ID:")
+    bot.register_next_step_handler(m, renew_user)
+
+def renew_user(m):
+    if not admin_only(m): return
+    uid = m.text.strip()
+    users = load(USERS_FILE, {})
+    if uid not in users:
+        bot.send_message(m.chat.id, "❌ User not found")
+        show_admin_panel(m.chat.id)
         return
-    txt = f"📋 *All Keys* (Total: {len(keys)})\n\n"
-    for k,v in keys.items():
-        txt += f"🔑 `{k}` ⏳ {duration_text(v)}\n"
+    users[uid]["expire"] += 86400
+    save(USERS_FILE, users)
+    bot.send_message(m.chat.id, "✅ User renewed for 1 Day")
+    show_admin_panel(m.chat.id)
+
+@bot.message_handler(func=lambda m: m.text == "📊 Sales & Usage")
+def stats(m):
+    if not admin_only(m): return
+    ensure_sales()
+    sales = load(SALES_FILE, {})
+    users = load(USERS_FILE, {})
+    txt = (
+        f"📊 *Sales & Usage Stats*\n\n"
+        f"🔑 Keys Generated: {sales['total_generated']}\n"
+        f"💰 Keys Sold: {sales['total_sold']}\n"
+        f"👤 Active Users: {len(users)}\n"
+        f"🎬 Total Downloads: {sales['total_downloads']}"
+    )
     bot.send_message(m.chat.id, txt, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "❌ Delete Key")
-def del_key(m):
-    msg = bot.send_message(m.chat.id, "Enter key to delete:")
-    bot.register_next_step_handler(msg, do_del_key)
+def del_key_prompt(m):
+    if not admin_only(m): return
+    bot.send_message(m.chat.id, "Enter key to delete:")
+    bot.register_next_step_handler(m, do_del_key)
 
 def do_del_key(m):
+    if not admin_only(m): return
     keys = load(KEYS_FILE, {})
     if m.text in keys:
         del keys[m.text]
         save(KEYS_FILE, keys)
-        bot.send_message(m.chat.id, "✅ Key successfully deleted")
+        bot.send_message(m.chat.id, "✅ Key deleted")
     else:
         bot.send_message(m.chat.id, "❌ Key not found")
     show_admin_panel(m.chat.id)
 
 @bot.message_handler(func=lambda m: m.text == "🚪 Logout")
 def logout(m):
-    bot.send_message(m.chat.id, "🚪 Logged out successfully\n/start again")
-    start(m)
+    admin_sessions.discard(m.chat.id)
+    admin_waiting.discard(m.chat.id)
+    bot.send_message(m.chat.id, "🚪 Logged out successfully")
+    send_welcome(m.chat.id)
 
-# ================= USER KEY FLOW =================
+# ================= USER KEY =================
 @bot.message_handler(func=lambda m: m.text.startswith("imdhaval-"))
-def check_key(m):
+def user_key(m):
     bot.send_message(m.chat.id, "⏳ Checking your key...")
     keys = load(KEYS_FILE, {})
     users = load(USERS_FILE, {})
+    sales = load(SALES_FILE, {})
 
     if m.text not in keys:
-        bot.send_message(m.chat.id, "❌ Wrong key, try again\n💬 Buy key 👉 @imvrct")
+        bot.send_message(m.chat.id, "❌ Wrong key\n🔁 Try again\n💬 @imvrct")
         return
 
     users[str(m.chat.id)] = {
-        "expire": time.time() + keys[m.text]
+        "expire": time.time() + keys[m.text],
+        "downloads": 0,
+        "last_used": None
     }
-    duration = duration_text(keys[m.text])
     del keys[m.text]
     save(KEYS_FILE, keys)
     save(USERS_FILE, users)
 
+    sales["total_sold"] += 1
+    save(SALES_FILE, sales)
+
     bot.send_message(
         m.chat.id,
-        f"✅ Successfully Logged In 🎉\n\n"
-        f"⏳ Duration: {duration}\n"
-        f"👇 Enter Instagram Reel link 🎬"
+        f"✅ Successfully Logged In 🎉\n⏳ Duration: {duration_text(86400)}\n👇 Enter reel link 🎬"
     )
 
 # ================= REEL =================
 @bot.message_handler(func=lambda m: "instagram.com/reel" in m.text)
 def reel(m):
-    if not is_active(m.chat.id):
-        bot.send_message(m.chat.id, "⏰ Key expired\nEnter new key or DM 👉 @imvrct")
+    if not user_active(m.chat.id):
+        bot.send_message(m.chat.id, "⏰ Key expired\n🔐 Enter new key")
         return
+
+    users = load(USERS_FILE, {})
+    sales = load(SALES_FILE, {})
+    users[str(m.chat.id)]["downloads"] += 1
+    users[str(m.chat.id)]["last_used"] = int(time.time())
+    sales["total_downloads"] += 1
+    save(USERS_FILE, users)
+    save(SALES_FILE, sales)
+
     try:
         sc = m.text.split("/")[-2]
         msg = bot.send_message(m.chat.id, "⏳ Downloading reel...")
@@ -176,5 +254,5 @@ def reel(m):
     except:
         bot.send_message(m.chat.id, "❌ Failed to download")
 
-print("✅ Stable Paid Reel Bot Running…")
+print("✅ Professional Paid Reel Bot Running…")
 bot.polling(non_stop=True)
