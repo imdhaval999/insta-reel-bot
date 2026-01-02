@@ -6,7 +6,7 @@ import http.cookiejar as cookielib
 from keep_alive import keep_alive
 
 # 🔐 Token from Render Environment
-BOT_TOKEN = os.getenv("8208876135:AAGm9nOwTcyqR2WFNH-174PKecmUISKlS20")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
