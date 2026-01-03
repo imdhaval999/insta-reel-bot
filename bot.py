@@ -2,7 +2,11 @@ import telebot, os, json, time, re
 from telebot import types
 from keep_alive import keep_alive
 
+# ================= BASIC =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN missing")
+
 bot = telebot.TeleBot(BOT_TOKEN)
 keep_alive()
 
@@ -12,51 +16,79 @@ KEY_PATTERN = re.compile(r"^imdhaval-\d+$")
 KEYS_FILE = "keys.json"
 USERS_FILE = "users.json"
 
+# ================= STATES =================
 admin_wait = set()
 admin_live = set()
 user_logged = set()
 
-admin_gen = {}
-admin_del = set()
-admin_ext = {}
+admin_gen_state = {}
+admin_del_wait = set()
+admin_ext_wait = {}
 
-# ---------- helpers ----------
+# ================= HELPERS =================
 def load(f, d):
-    if not os.path.exists(f): return d
+    if not os.path.exists(f):
+        return d
     return json.load(open(f))
 
 def save(f, d):
     json.dump(d, open(f, "w"), indent=2)
 
-def welcome(uid):
-    user_logged.discard(uid)
+def reset_admin(chat_id):
+    admin_wait.discard(chat_id)
+    admin_live.discard(chat_id)
+    admin_del_wait.discard(chat_id)
+    admin_ext_wait.pop(chat_id, None)
+    admin_gen_state.pop(chat_id, None)
+
+def welcome_user(chat_id):
+    user_logged.discard(chat_id)
     bot.send_message(
-        uid,
-        "🔥 Instagram Reel Downloader – Private Bot\n\n"
+        chat_id,
+        "🔥 *Instagram Reel Downloader – Private Bot*\n\n"
         "🔐 Enter your key to start service\n"
-        "💬 Buy key 👉 @imvrct"
+        "💬 Buy key 👉 @imvrct",
+        parse_mode="Markdown"
     )
 
-def logout_user(uid, msg):
-    bot.send_message(uid, msg)
-    welcome(uid)
+def logout_user(chat_id, reason):
+    bot.send_message(chat_id, reason)
+    welcome_user(chat_id)
 
-# ---------- START ----------
+def key_status(chat_id):
+    users = load(USERS_FILE, {})
+    keys = load(KEYS_FILE, {})
+
+    u = users.get(str(chat_id))
+    if not u:
+        return None, "not_logged"
+
+    key = u["key"]
+    if key not in keys:
+        return None, "deleted"
+
+    k = keys[key]
+    if k.get("blocked"):
+        return None, "blocked"
+
+    if time.time() > u["expire"]:
+        return None, "expired"
+
+    return key, "active"
+
+# ================= START =================
 @bot.message_handler(commands=["start"])
 def start(m):
-    admin_wait.discard(m.chat.id)
-    admin_live.discard(m.chat.id)
-    admin_del.discard(m.chat.id)
-    admin_ext.pop(m.chat.id, None)
-    welcome(m.chat.id)
+    reset_admin(m.chat.id)
+    welcome_user(m.chat.id)
 
-# ---------- USER LOGIN ----------
+# ================= USER LOGIN =================
 @bot.message_handler(func=lambda m: m.text and KEY_PATTERN.match(m.text) and m.chat.id not in admin_live)
-def user_key(m):
+def user_login(m):
     keys = load(KEYS_FILE, {})
     users = load(USERS_FILE, {})
-
     key = m.text
+
     if key not in keys:
         bot.send_message(m.chat.id, "❌ Key not found")
         return
@@ -85,25 +117,29 @@ def user_key(m):
     user_logged.add(m.chat.id)
     bot.send_message(m.chat.id, "✅ Login successful 🎉\nSend reel link 🎬")
 
-# ---------- URL WITHOUT KEY ----------
+# ================= URL WITHOUT KEY =================
 @bot.message_handler(func=lambda m: m.text.startswith("http") and m.chat.id not in user_logged)
-def url_without_key(m):
+def no_key_url(m):
     bot.send_message(
         m.chat.id,
         "❌ Please purchase a key first\n💬 Contact @imvrct"
     )
 
-# ---------- ADMIN ENTRY ----------
+# ================= ADMIN ENTRY =================
 @bot.message_handler(func=lambda m: m.text == "Admin")
 def admin_entry(m):
     admin_wait.add(m.chat.id)
-    bot.send_message(m.chat.id, "👑 Welcome to Admin Panel\n🔐 Enter admin key")
+    bot.send_message(
+        m.chat.id,
+        "👑 *Admin Panel*\n🔐 Enter admin key",
+        parse_mode="Markdown"
+    )
 
 @bot.message_handler(func=lambda m: m.chat.id in admin_wait)
-def admin_key(m):
+def admin_login(m):
     if m.text == "/start":
-        admin_wait.discard(m.chat.id)
-        welcome(m.chat.id)
+        reset_admin(m.chat.id)
+        welcome_user(m.chat.id)
         return
 
     if m.text != ADMIN_SECRET:
@@ -112,22 +148,22 @@ def admin_key(m):
 
     admin_wait.discard(m.chat.id)
     admin_live.add(m.chat.id)
-    show_admin(m.chat.id)
+    show_admin_panel(m.chat.id)
 
-# ---------- ADMIN PANEL ----------
-def show_admin(uid):
+# ================= ADMIN PANEL =================
+def show_admin_panel(chat_id):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("➕ Generate Key", "📋 All Keys")
     kb.add("🗑️ Delete Key", "⏳ Extend Key")
     kb.add("🚪 Logout")
-    bot.send_message(uid, "👑 Admin Panel", reply_markup=kb)
+    bot.send_message(chat_id, "👑 Admin Panel", reply_markup=kb)
 
 @bot.message_handler(func=lambda m: m.text == "🚪 Logout")
 def admin_logout(m):
-    admin_live.discard(m.chat.id)
-    welcome(m.chat.id)
+    reset_admin(m.chat.id)
+    welcome_user(m.chat.id)
 
-# ---------- GENERATE KEY ----------
+# ================= GENERATE KEY =================
 @bot.message_handler(func=lambda m: m.text == "➕ Generate Key" and m.chat.id in admin_live)
 def gen_type(m):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -135,37 +171,69 @@ def gen_type(m):
     bot.send_message(m.chat.id, "Select key type", reply_markup=kb)
 
 @bot.message_handler(func=lambda m: m.chat.id in admin_live and m.text in ["Single User","Multi User"])
-def gen_dur(m):
-    admin_gen[m.chat.id] = "single" if m.text=="Single User" else "multi"
+def gen_duration(m):
+    admin_gen_state[m.chat.id] = "single" if m.text=="Single User" else "multi"
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add("5 Min","1 Day","30 Day","⬅ Back")
     bot.send_message(m.chat.id, "Select duration", reply_markup=kb)
 
 @bot.message_handler(func=lambda m: m.chat.id in admin_live and m.text in ["5 Min","1 Day","30 Day"])
 def gen_key(m):
-    d={"5 Min":300,"1 Day":86400,"30 Day":2592000}
-    key="imdhaval-"+str(int(time.time()))
-    keys=load(KEYS_FILE,{})
-    keys[key]={
-        "duration":d[m.text],
-        "type":admin_gen[m.chat.id],
-        "used_by":[],
-        "blocked":False
+    d = {"5 Min":300,"1 Day":86400,"30 Day":2592000}
+    key = "imdhaval-" + str(int(time.time()))
+    keys = load(KEYS_FILE,{})
+    keys[key] = {
+        "duration": d[m.text],
+        "type": admin_gen_state[m.chat.id],
+        "used_by": [],
+        "blocked": False
     }
-    save(KEYS_FILE,keys)
-    bot.send_message(m.chat.id,f"✅ Key Generated\n🔑 `{key}`",parse_mode="Markdown")
-    show_admin(m.chat.id)
+    save(KEYS_FILE, keys)
+    bot.send_message(m.chat.id, f"✅ Key Generated\n🔑 `{key}`", parse_mode="Markdown")
+    show_admin_panel(m.chat.id)
 
-# ---------- BACK ----------
-@bot.message_handler(func=lambda m: m.text=="⬅ Back" and m.chat.id in admin_live)
+# ================= ALL KEYS =================
+@bot.message_handler(func=lambda m: m.text == "📋 All Keys" and m.chat.id in admin_live)
+def all_keys(m):
+    keys = load(KEYS_FILE,{})
+    if not keys:
+        bot.send_message(m.chat.id, "No keys found")
+        return
+
+    txt = ""
+    for k,v in keys.items():
+        used = "Used" if v["used_by"] else "Not Used"
+        block = (
+            f"🔑 `{k}`\n"
+            f"👥 {v['type']}\n"
+            f"📊 {used}\n\n"
+        )
+        if len(txt)+len(block) > 3800:
+            bot.send_message(m.chat.id, txt, parse_mode="Markdown")
+            txt = block
+        else:
+            txt += block
+    if txt:
+        bot.send_message(m.chat.id, txt, parse_mode="Markdown")
+
+# ================= BACK =================
+@bot.message_handler(func=lambda m: m.text == "⬅ Back" and m.chat.id in admin_live)
 def back(m):
-    show_admin(m.chat.id)
+    show_admin_panel(m.chat.id)
 
-# ---------- FALLBACK ----------
+# ================= FALLBACK =================
 @bot.message_handler(func=lambda m: True)
 def fallback(m):
+    # Admin mode – ignore fallback
+    if m.chat.id in admin_live or m.chat.id in admin_wait:
+        return
+
+    # Logged user – ignore fallback
+    if m.chat.id in user_logged:
+        return
+
     if m.text != "/start":
         bot.send_message(m.chat.id, "❌ Key not found")
 
-print("✅ FINAL BOT RUNNING (LOCKED FLOW)")
+print("✅ SELLER-GRADE BOT RUNNING")
 bot.polling(non_stop=True)
