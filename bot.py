@@ -18,6 +18,8 @@ ADMIN_SECRET = "imdhaval"
 KEYS_FILE  = "keys.json"
 USERS_FILE = "users.json"
 
+KEY_PATTERN = re.compile(r"^imdhaval-\d+$")
+
 # ================= STATES =================
 admin_wait = set()
 admin_live = set()
@@ -26,8 +28,6 @@ user_logged = set()
 admin_gen_state = {}
 admin_del_wait = set()
 admin_ext_wait = {}   # chat_id -> key or None
-
-KEY_PATTERN = re.compile(r"^imdhaval-\w+")
 
 # ================= HELPERS =================
 def load(f, d):
@@ -74,39 +74,35 @@ def start(m):
     admin_ext_wait.pop(m.chat.id, None)
     user_welcome(m.chat.id)
 
-# ---------- USER KEY LOGIN ----------
+# ---------- USER LOGIN ----------
 @bot.message_handler(func=lambda m: m.text and KEY_PATTERN.match(m.text) and m.chat.id not in admin_live)
 def user_key(m):
     keys = load(KEYS_FILE, {})
     users = load(USERS_FILE, {})
-
     key = m.text
 
     if key not in keys:
         bot.send_message(m.chat.id, "❌ Key not found")
         return
 
-    key_data = keys[key]
+    k = keys[key]
 
-    if key_data.get("blocked"):
+    if k.get("blocked"):
         bot.send_message(m.chat.id, "🚫 Your key is blocked")
         return
 
-    if key_data["type"] == "single" and key_data["used_by"]:
+    if k["type"] == "single" and k["used_by"]:
         bot.send_message(m.chat.id, "📵 Max device reached")
         return
 
-    expire = time.time() + key_data["duration"]
+    expire = time.time() + k["duration"]
     if expire <= time.time():
         bot.send_message(m.chat.id, "⏰ Your key is expired")
         return
 
-    users[str(m.chat.id)] = {
-        "key": key,
-        "expire": expire
-    }
+    users[str(m.chat.id)] = {"key": key, "expire": expire}
+    k["used_by"].append(m.chat.id)
 
-    key_data["used_by"].append(m.chat.id)
     save(KEYS_FILE, keys)
     save(USERS_FILE, users)
 
@@ -163,8 +159,9 @@ def gen_dur(m):
 
 @bot.message_handler(func=lambda m: m.chat.id in admin_live and m.text in ["5 Min", "1 Day", "30 Day"])
 def gen_key(m):
-    dmap = {"5 Min": 300, "1 Day": 86400, "30 Day": 2592000}
+    dmap = {"5 Min":300, "1 Day":86400, "30 Day":2592000}
     key = "imdhaval-" + str(int(time.time()))
+
     keys = load(KEYS_FILE, {})
     keys[key] = {
         "duration": dmap[m.text],
@@ -174,6 +171,7 @@ def gen_key(m):
         "blocked": False
     }
     save(KEYS_FILE, keys)
+
     bot.send_message(m.chat.id, f"✅ Key Generated\n🔑 `{key}`", parse_mode="Markdown")
     show_admin_panel(m.chat.id)
 
@@ -204,11 +202,71 @@ def all_keys(m):
     if txt:
         bot.send_message(m.chat.id, txt, parse_mode="Markdown")
 
+# ================= DELETE KEY =================
+@bot.message_handler(func=lambda m: m.text == "🗑️ Delete Key" and m.chat.id in admin_live)
+def del_prompt(m):
+    admin_del_wait.add(m.chat.id)
+    bot.send_message(m.chat.id, "📌 Send key to DELETE")
+
+@bot.message_handler(func=lambda m: m.chat.id in admin_del_wait)
+def del_key(m):
+    if not KEY_PATTERN.match(m.text):
+        bot.send_message(m.chat.id, "⚠️ Please send a valid key")
+        return
+
+    keys = load(KEYS_FILE, {})
+    if m.text not in keys:
+        bot.send_message(m.chat.id, "❌ Key not found")
+        return
+
+    del keys[m.text]
+    save(KEYS_FILE, keys)
+
+    admin_del_wait.discard(m.chat.id)
+    bot.send_message(m.chat.id, "✅ Key successfully deleted")
+    all_keys(m)
+
+# ================= EXTEND KEY =================
+@bot.message_handler(func=lambda m: m.text == "⏳ Extend Key" and m.chat.id in admin_live)
+def ext_prompt(m):
+    admin_ext_wait[m.chat.id] = None
+    bot.send_message(m.chat.id, "📌 Send key to EXTEND")
+
+@bot.message_handler(func=lambda m: m.chat.id in admin_ext_wait and admin_ext_wait[m.chat.id] is None)
+def ext_key(m):
+    if not KEY_PATTERN.match(m.text):
+        bot.send_message(m.chat.id, "⚠️ Please send a valid key")
+        return
+
+    keys = load(KEYS_FILE, {})
+    if m.text not in keys:
+        bot.send_message(m.chat.id, "❌ Key not found")
+        return
+
+    admin_ext_wait[m.chat.id] = m.text
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("➕ 5 Min", "➕ 1 Day", "➕ 30 Day")
+    bot.send_message(m.chat.id, "Select extend time", reply_markup=kb)
+
+@bot.message_handler(func=lambda m: m.chat.id in admin_ext_wait and m.text in ["➕ 5 Min","➕ 1 Day","➕ 30 Day"])
+def do_extend(m):
+    key = admin_ext_wait[m.chat.id]
+    dmap = {"➕ 5 Min":300,"➕ 1 Day":86400,"➕ 30 Day":2592000}
+
+    keys = load(KEYS_FILE, {})
+    keys[key]["duration"] += dmap[m.text]
+    keys[key]["extended"] += 1
+    save(KEYS_FILE, keys)
+
+    admin_ext_wait.pop(m.chat.id)
+    bot.send_message(m.chat.id, "✅ Key extended successfully")
+    all_keys(m)
+
 # ================= FALLBACK =================
 @bot.message_handler(func=lambda m: True)
 def fallback(m):
     if m.text != "/start":
         bot.send_message(m.chat.id, "❌ Key not found")
 
-print("✅ FINAL STABLE BOT RUNNING")
+print("✅ FINAL BOT RUNNING (STABLE BUILD)")
 bot.polling(non_stop=True)
